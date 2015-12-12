@@ -230,17 +230,25 @@ def validate(message, ssldir=None, **config):
     return True
 
 
-def _load_remote_cert(location, cache, cache_expiry, **config):
+def _load_remote_cert(location, cache, cache_expiry, tries=0, **config):
     """ Get a fresh copy from fp.o/fedmsg/crl.pem if ours is getting stale.
 
     Return the local filename.
     """
+    alternative_cache = os.path.expanduser("~/.local" + cache)
 
     try:
         modtime = os.stat(cache).st_mtime
     except OSError:
         # File does not exist yet.
-        modtime = 0
+        try:
+            # Try alternative location.
+            modtime = os.stat(alternative_cache).st_mtime
+            # It worked!  Use the alternative location
+            cache = alternative_cache
+        except OSError:
+            # Neither file exists
+            modtime = 0
 
     if (
         (not modtime and not cache_expiry) or
@@ -251,12 +259,18 @@ def _load_remote_cert(location, cache, cache_expiry, **config):
             with open(cache, 'w') as f:
                 f.write(response.content)
         except requests.exceptions.ConnectionError:
-            log.error("Could not access %r" % location)
-            raise
+            if tries < 3:
+                log.warn("Could not access %r.  Trying again." % location)
+                time.sleep(1)  # Take a nap to see if the network settles down.
+                return _load_remote_cert(
+                    location, cache, cache_expiry, tries+1, **config)
+            else:
+                log.error("Could not access %r" % location)
+                raise
         except IOError as e:
             # If we couldn't write to the specified cache location, try a
             # similar place but inside our home directory instead.
-            cache = os.path.expanduser("~/.local" + cache)
+            cache = alternative_cache
             usr_dir = '/'.join(cache.split('/')[:-1])
 
             if not os.path.isdir(usr_dir):
